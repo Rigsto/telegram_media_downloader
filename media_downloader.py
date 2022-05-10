@@ -4,6 +4,7 @@ import logging
 import os
 from datetime import datetime as dt
 from typing import List, Optional, Tuple, Union
+from pathlib import Path
 
 import pyrogram
 import yaml
@@ -26,6 +27,7 @@ logging.getLogger("pyrogram.client").addFilter(LogFilter())
 logger = logging.getLogger("media_downloader")
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+MEDIA_DIR = (Path().parent.absolute()).parent
 FAILED_IDS: list = []
 DOWNLOADED_IDS: list = []
 
@@ -39,8 +41,9 @@ def update_config(config: dict):
     config: dict
         Configuration to be written into config file.
     """
-    config["ids_to_retry"] = (
-        list(set(config["ids_to_retry"]) - set(DOWNLOADED_IDS)) + FAILED_IDS
+    working_chat_source = config['chat_source']
+    config['chat_infos'][working_chat_source]['retry_ids'] = (
+        list(set(config['chat_infos'][working_chat_source]['retry_ids']) - set(DOWNLOADED_IDS)) + FAILED_IDS
     )
     with open("config.yaml", "w") as yaml_file:
         yaml.dump(config, yaml_file, default_flow_style=False)
@@ -121,7 +124,7 @@ async def _get_media_meta(
         # pylint: disable = C0209
         file_format = media_obj.mime_type.split("/")[-1]  # type: ignore
         file_name: str = os.path.join(
-            THIS_DIR,
+            MEDIA_DIR,
             _type,
             "{}_{}.{}".format(
                 _type,
@@ -131,7 +134,7 @@ async def _get_media_meta(
         )
     else:
         file_name = os.path.join(
-            THIS_DIR, _type, getattr(media_obj, "file_name", None) or ""
+            MEDIA_DIR, _type, getattr(media_obj, "file_name", None) or ""
         )
     return file_name, file_format
 
@@ -311,18 +314,23 @@ async def begin_import(config: dict, pagination_limit: int) -> dict:
         api_hash=config["api_hash"],
     )
     await client.start()
-    last_read_message_id: int = config["last_read_message_id"]
+    working_chat_source: int = config['chat_source']
+    last_read_message_id: int = config['chat_infos'][working_chat_source]['last_message']
+
+    global MEDIA_DIR
+    MEDIA_DIR = os.path.join((Path().parent.absolute()).parent, config['chat_infos'][working_chat_source]['name'])
+
     messages_iter = client.iter_history(
-        config["chat_id"],
+        config['chat_infos'][working_chat_source]['id'],
         offset_id=last_read_message_id,
         reverse=True,
     )
     messages_list: list = []
     pagination_count: int = 0
-    if config["ids_to_retry"]:
+    if config['chat_infos'][working_chat_source]['retry_ids']:
         logger.info("Downloading files failed during last run...")
         skipped_messages: list = await client.get_messages(  # type: ignore
-            chat_id=config["chat_id"], message_ids=config["ids_to_retry"]
+            chat_id=config['chat_infos'][working_chat_source]['id'], message_ids=config['chat_infos'][working_chat_source]['retry_ids']
         )
         for message in skipped_messages:
             pagination_count += 1
@@ -340,10 +348,10 @@ async def begin_import(config: dict, pagination_limit: int) -> dict:
                 config["file_formats"],
             )
             pagination_count = 0
-            messages_list = []
-            messages_list.append(message)
-            config["last_read_message_id"] = last_read_message_id
+            messages_list = [message]
+            config['chat_infos'][working_chat_source]['last_message'] = last_read_message_id
             update_config(config)
+
     if messages_list:
         last_read_message_id = await process_messages(
             client,
@@ -353,7 +361,8 @@ async def begin_import(config: dict, pagination_limit: int) -> dict:
         )
 
     await client.stop()
-    config["last_read_message_id"] = last_read_message_id
+    config['chat_infos'][working_chat_source]['last_message'] = last_read_message_id
+
     return config
 
 
